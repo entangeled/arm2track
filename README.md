@@ -13,3 +13,6 @@ Built with [Robotics Toolbox for Python](https://github.com/petercorke/roboticst
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
+
+
+hi
