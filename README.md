@@ -3,6 +3,10 @@
 Four robotic arms coordinate to keep a toy train moving in a circular path:  
 - ** Arm 1 (UR3) ** 
 - ** Arm 2, 3, 4 (Self-chosen robots) **
+- robots used
+-   Eva: KUKA
+-   Danil:
+-   Nelly: Self Created 
 - Arm 1 sits in the middle and pushes the train in a circle
 - Arms 2, 3, 4 sit in a triangle outside the circle track and move the track pieces in their region
 
