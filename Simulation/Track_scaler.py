@@ -57,7 +57,7 @@ def main():
 
     # constants
     N_SEGMENTS = 9
-    UNIT_SCALE = 0.0001
+    UNIT_SCALE = 0.0005
     SCALE_VEC  = [UNIT_SCALE, UNIT_SCALE, UNIT_SCALE]
     COLOR      = [0.35, 0.35, 0.38, 1]
 
