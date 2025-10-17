@@ -1,8 +1,9 @@
-# train_demo.py — Ring + Train + Panda + Linked Track Zones + Segment Buttons
+# train_demo.py — Ring + Train + Panda follow + Animated Segment Toggles
 
-from math import pi
+from math import pi, cos
 from pathlib import Path
 from dataclasses import dataclass
+import numpy as np
 
 from spatialmath import SE3
 from spatialgeometry import Mesh, Cuboid, Cylinder
@@ -27,25 +28,7 @@ class RingCfg:
 
 
 # -------------------------------
-# Geometry helpers
-# -------------------------------
-def lay_flat_tangent_pose(i, n, cx, cy, R, Z, yaw_tweak_deg, gyaw_deg):
-    dth = 2 * pi / n
-    th = i * dth
-    yawfix = yaw_tweak_deg * pi / 180
-    gyaw = gyaw_deg * pi / 180
-    return (
-        SE3(cx, cy, Z)
-        * SE3.Rz(gyaw)
-        * SE3.Rz(th)
-        * SE3.Tx(R)
-        * SE3.Rz(pi / 2 + yawfix)
-        * SE3.Rx(-pi / 2)
-    )
-
-
-# -------------------------------
-# Track ring
+# Track ring (with animation)
 # -------------------------------
 class TrackRing:
     def __init__(self, env, segment_path, cfg: RingCfg):
@@ -55,8 +38,11 @@ class TrackRing:
         s = cfg.unit_scale
         self.scale = [s, s, s]
         self.pieces = []
-        self.gapset = set()        # indices of segments currently OUT (missing)
-        self.out_offset = 0.6      # one place to control how far OUT pieces slide
+
+        self.gapset = set()       # indices that are OUT
+        self.out_offset = 0.30    # slide distance (meters)
+        # idx -> {'t':0.0, 'dur':0.8, 'r0':..., 'r1':...}
+        self.anim = {}
 
     def build(self):
         for _ in range(self.cfg.n_segments):
@@ -65,34 +51,79 @@ class TrackRing:
             self.pieces.append(m)
         self.update()
 
-    def update(self):
+    def _place_segment(self, i: int, r: float):
         c = self.cfg
-        for i, p in enumerate(self.pieces):
-            p.T = lay_flat_tangent_pose(
-                i, c.n_segments, c.center_x, c.center_y, c.radius,
-                c.height_z, c.yaw_tweak_deg, c.global_yaw_deg
-            ).A
-
-    def pose_for_theta(self, theta):
-        c = self.cfg
-        return (
+        n = c.n_segments
+        theta = 2 * pi * i / n
+        T = (
             SE3(c.center_x, c.center_y, c.height_z)
             * SE3.Rz(c.global_yaw_deg * pi / 180)
             * SE3.Rz(theta)
-            * SE3.Tx(c.radius)
+            * SE3.Tx(r)
             * SE3.Rz(pi / 2 + c.yaw_tweak_deg * pi / 180)
             * SE3.Rx(-pi / 2)
         )
+        self.pieces[i].T = T.A
 
-    def set_segment_angle(self, idx, theta):
-        self.pieces[idx].T = self.pose_for_theta(theta).A
+    def update(self):
+        """Per-frame placement and animation."""
+        c = self.cfg
+        r_in  = c.radius
+        r_out = c.radius + self.out_offset
 
-    # ---- NEW: current segment pose that respects IN/OUT and allows a phase offset
+        finished = []
+        for i in range(len(self.pieces)):
+            if i in self.anim:
+                st = self.anim[i]
+                st['t'] += 0.05   # matches App.dt
+                u = min(1.0, st['t'] / st['dur'])
+                s = 0.5 - 0.5 * cos(pi * u)  # cosine ease
+                r = st['r0'] + (st['r1'] - st['r0']) * s
+                self._place_segment(i, r)
+                if u >= 1.0:
+                    finished.append(i)
+            else:
+                r = r_out if (i in self.gapset) else r_in
+                self._place_segment(i, r)
+
+        # commit logic when animations finish
+        for i in finished:
+            final_r = self.anim[i]['r1']
+            if abs(final_r - r_out) < 1e-9:
+                self.gapset.add(i)      # OUT
+            else:
+                self.gapset.discard(i)  # IN
+            del self.anim[i]
+
+    def start_slide(self, idx: int, present: bool, dur: float = 0.8):
+        """present=True -> slide to IN; present=False -> slide to OUT"""
+        c = self.cfg
+        r_in  = c.radius
+        r_out = c.radius + self.out_offset
+        r_now = r_out if (idx in self.gapset) else r_in
+        r_tar = r_in if present else r_out
+        self.anim[idx] = {'t': 0.0, 'dur': max(0.05, dur), 'r0': r_now, 'r1': r_tar}
+
+    def is_animating(self) -> bool:
+        return bool(self.anim)
+
+    def allowed_speed(self, theta_now: float, requested_speed: float) -> float:
+        """Stop the train if current or next segment is OUT."""
+        if not self.gapset:
+            return requested_speed
+        n = self.cfg.n_segments
+        i = int(((theta_now % (2*pi)) / (2*pi)) * n) % n
+        ahead = (i + 1) % n
+        if i in self.gapset or ahead in self.gapset:
+            return 0.0
+        return requested_speed
+
     def segment_pose_with_offset(self, idx: int, theta_offset: float = 0.0):
+        """Pose utility used by the red blocks."""
         c = self.cfg
         n = c.n_segments
         theta = 2 * pi * idx / n + theta_offset
-        r = c.radius + (self.out_offset if idx in self.gapset else 0.0)
+        r = (c.radius + self.out_offset) if (idx in self.gapset) else c.radius
         return (
             SE3(c.center_x, c.center_y, c.height_z)
             * SE3.Rz(c.global_yaw_deg * pi / 180)
@@ -102,88 +133,11 @@ class TrackRing:
             * SE3.Rx(-pi / 2)
         )
 
-    # ---- gating helpers (segment IN/OUT + speed gate) ----
-    def theta_to_seg(self, theta: float) -> int:
-        n = self.cfg.n_segments
-        t = (theta % (2 * pi))
-        return int((t / (2 * pi)) * n) % n
-
-    def set_segment_present(self, idx: int, present: bool):
-        """
-        Move a segment OUT (present=False) by pushing it radially outward;
-        move it back IN (present=True) to the exact ring pose.
-        """
-        c = self.cfg
-        theta = 2 * pi * idx / self.cfg.n_segments
-
-        if present:
-            self.pieces[idx].T = self.pose_for_theta(theta).A
-            self.gapset.discard(idx)
-        else:
-            T = (
-                SE3(c.center_x, c.center_y, c.height_z)
-                * SE3.Rz(c.global_yaw_deg * pi / 180)
-                * SE3.Rz(theta)
-                * SE3.Tx(c.radius + self.out_offset)
-                * SE3.Rz(pi / 2 + c.yaw_tweak_deg * pi / 180)
-                * SE3.Rx(-pi / 2)
-            )
-            self.pieces[idx].T = T.A
-            self.gapset.add(idx)
-
-    def allowed_speed(self, theta_now: float, requested_speed: float) -> float:
-        """
-        If the current or next segment is OUT, force speed to 0 (stop train).
-        Otherwise, allow requested_speed.
-        """
-        if not self.gapset:
-            return requested_speed
-        n = self.cfg.n_segments
-        i = self.theta_to_seg(theta_now)
-        ahead = (i + 1) % n
-        if i in self.gapset or ahead in self.gapset:
-            return 0.0
-        return requested_speed
-
-    # ---- NEW (for later): make a segment follow a given block pose
-    #     Keep this here; we won't call it yet until you want "block drives track".
-    def align_segment_to_block(self, idx: int, block_T: SE3, theta_offset: float = 0.0):
-        """
-        Infer angle & radius from a block, decide IN/OUT, then place the segment
-        tangent to the ring at that angle, respecting our yaw_tweak and base height.
-        """
-        import math
-        c = self.cfg
-        px, py, pz = float(block_T.t[0]), float(block_T.t[1]), float(block_T.t[2])
-
-        dx = px - c.center_x
-        dy = py - c.center_y
-        r = (dx*dx + dy*dy) ** 0.5
-        theta = (math.atan2(dy, dx) - (c.global_yaw_deg * pi / 180))  # world -> ring frame
-
-        # Decide IN/OUT based on radius (threshold halfway to out_offset)
-        is_out = r > (c.radius + 0.5 * self.out_offset)
-        self.set_segment_present(idx, present=not is_out)
-
-        # Place the segment with our ring tangent frame at this angle (optionally phase-offset)
-        theta += theta_offset
-        base_r = c.radius + (self.out_offset if is_out else 0.0)
-        Tseg = (
-            SE3(c.center_x, c.center_y, c.height_z)
-            * SE3.Rz(c.global_yaw_deg * pi / 180)
-            * SE3.Rz(theta)
-            * SE3.Tx(base_r)
-            * SE3.Rz(pi / 2 + c.yaw_tweak_deg * pi / 180)
-            * SE3.Rx(-pi / 2)
-        )
-        self.pieces[idx].T = Tseg.A
-
 
 # -------------------------------
 # Train cart running on ring
 # -------------------------------
 class Train:
-    """Train perfectly aligned on the track and driven by angular speed."""
     def __init__(self, env, mesh_path, cfg: RingCfg):
         self.env = env
         self.cfg = cfg
@@ -228,32 +182,24 @@ class Train:
 
 
 # -------------------------------
-# Linked reach blocks (attached to tracks) — FIXED PLACEMENT
+# Linked reach blocks (attached to tracks)
 # -------------------------------
 class TrackLinkedZones:
-    """
-    9 red blocks positioned at the midline of each track segment.
-    They follow the segment state (IN/OUT) AND keep your original phase offset.
-    Exposes a stable 9-point array you’ll give to the outer robots later.
-    """
+    """Small red blocks that track each segment with a fixed offset."""
     def __init__(self, env, ring: "TrackRing", cfg: "RingCfg"):
         self.env = env
         self.ring = ring
         self.cfg = cfg
         self.blocks = []
 
-        # Your remembered dimensions (unchanged)
-        self.block_offset = 0.255                 # radial tweak (m)
-        self.lift = -0.005                        # vertical tweak (m)
-        self.theta_offset = -16.71 * pi / 180.0   # ring phase offset (rad)
+        # offsets you’ve been using
+        self.block_offset = 0.255
+        self.lift = -0.005
+        self.theta_offset = -16.71 * pi / 180.0
 
         self.world_points = []
 
     def _block_pose_for_index(self, i: int):
-        """
-        Start from the segment’s *current* pose (IN/OUT radius)
-        with your theta_offset applied, then add your radial+vertical tweaks.
-        """
         segT = self.ring.segment_pose_with_offset(i, self.theta_offset)
         return segT * SE3.Tx(self.block_offset) * SE3.Tz(self.lift)
 
@@ -268,7 +214,6 @@ class TrackLinkedZones:
             self.world_points.append((float(p[0]), float(p[1]), float(p[2])))
 
     def update(self):
-        n = self.cfg.n_segments
         for i, block in enumerate(self.blocks):
             T = self._block_pose_for_index(i)
             block.T = T.A
@@ -280,14 +225,9 @@ class TrackLinkedZones:
 
 
 # -------------------------------
-# Panda robot in the middle (goal-seeking IK with smoothing + reach clamp)
+# Panda robot: spin waist to follow the train
 # -------------------------------
 class RobotArm:
-    """
-    Lightweight IK: set a goal pose; each update() step nudges joints toward it.
-    Provides helpers to compute a pose above an orange block and 'home' at center.
-    Uses a reach clamp so goals stay solvable when the ring radius > Panda reach.
-    """
     def __init__(self, env, cfg: RingCfg):
         self.env = env
         self.cfg = cfg
@@ -296,99 +236,40 @@ class RobotArm:
         self.robot.base = SE3(cfg.center_x, cfg.center_y, 0.0)
         env.add(self.robot)
 
-        # pedestal (visual only)
+        # pedestal visual
         env.add(Cylinder(radius=0.12, length=0.25,
                          pose=SE3(cfg.center_x, cfg.center_y, 0.125),
                          color=[0.2, 0.2, 0.22, 1.0]))
 
-        # IK state
-        self.q_home = self.robot.qz
-        self.q_target = self.q_home.copy()
-        self.alpha = 0.35   # responsive; adjust 0.25–0.45 to taste
-        self.ik_hz = 20     # enough at dt=0.05; use 30 if you later speed up the loop
-        self._accum = 0.0
-        self._mask = [1, 1, 1, 0.5, 0.5, 0.5]   # relax orientation slightly
+        if hasattr(self.robot, "qr") and self.robot.qr is not None:
+            q_ready = self.robot.qr.copy()
+        else:
+            q_ready = self.robot.qz.copy()
+        self.q_follow = q_ready
 
-        # tool tilt to avoid singularities, pointing slightly down
-        self._tilt = SE3.RPY([pi * 0.85, 0, 0], order="xyz")
 
-        # ---- NEW: soft reach limit (meters) so goals are solvable
-        # Panda effective comfortable reach ~0.85 m; keep a little margin
-        self.reach_limit = 0.80
-        self.reach_margin = 0.10
+        # joint-0 limits
+        self._j0_min = -2.8973
+        self._j0_max =  2.8973
 
-        # current goal pose (SE3)
-        self.goal_T = self.home_pose()
+    @staticmethod
+    def _wrap_pi(a):
+        return (a + np.pi) % (2*np.pi) - np.pi
 
-    # --- goal helpers ---
-    def home_pose(self):
-        # hover above center
-        return SE3(self.cfg.center_x, self.cfg.center_y, self.cfg.height_z + 0.45) * self._tilt
-
-    def _clamp_xy_to_reach(self, px: float, py: float):
-        """
-        Keep goal within a disk of radius (reach_limit - margin) around the base.
-        Returns (x, y) possibly contracted along the ray from center to (px, py).
-        """
-        import math
-        cx, cy = self.cfg.center_x, self.cfg.center_y
-        dx, dy = (px - cx), (py - cy)
-        r = math.hypot(dx, dy)
-        rmax = max(0.05, self.reach_limit - self.reach_margin)
-        if r <= rmax:
-            return px, py
-        ux, uy = dx / r, dy / r
-        return (cx + ux * rmax, cy + uy * rmax)
-
-    def pose_above_block(self, block_T: SE3, hover: float = 0.25, down: float = 0.05, mode: str = "hover"):
-        """
-        Compose a goal from a block's transform.
-        mode="hover": stand above the block by `hover` in world Z
-        mode="down":  stand close to the block by `down` in world Z
-        NOTE: XY is clamped to be reachable while preserving the direction.
-        """
-        dz = hover if mode == "hover" else down
-        bx, by, bz = float(block_T.t[0]), float(block_T.t[1]), float(block_T.t[2])
-        gx, gy = self._clamp_xy_to_reach(bx, by)
-        return SE3(gx, gy, bz + dz) * self._tilt
-
-    # --- control API ---
-    def set_goal(self, T_goal: SE3):
-        self.goal_T = T_goal
-
-    def at_goal(self, pos_tol=0.01, rot_tol_deg=7.0):
-        """Rough proximity check: ~1 cm and ~7°."""
-        import numpy as np, math
-        Tcur = SE3(self.robot.fkine(self.robot.q).A)
-        p_err = np.linalg.norm(Tcur.t - self.goal_T.t)
-        Rerr = (Tcur.R.T @ self.goal_T.R)
-        ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(Rerr) - 1) / 2))))
-        return (p_err <= pos_tol) and (ang <= rot_tol_deg)
-
-    def update(self, dt):
-        """Solve IK toward goal at ~ik_hz, then smooth joints."""
-        self._accum += dt
-        if self._accum >= 1.0 / self.ik_hz:
-            self._accum = 0.0
-            sol = self.robot.ikine_LM(self.goal_T, q0=self.robot.q, mask=self._mask)
-            if sol.success:
-                self.q_target = sol.q
-            else:
-                # gentle drift to home if solver fails
-                self.q_target = 0.98 * self.q_target + 0.02 * self.q_home
-        # smooth toward target
-        self.robot.q = (1 - self.alpha) * self.robot.q + self.alpha * self.q_target
+    def follow_train_yaw(self, theta, yaw_bias=0.0):
+        """Rotate only joint 0 so the arm spins around the pedestal."""
+        q = self.q_follow.copy()
+        j0 = self._wrap_pi(theta + yaw_bias)
+        j0 = float(np.clip(j0, self._j0_min, self._j0_max))
+        q[0] = j0
+        self.robot.q = q
 
 
 # -------------------------------
-# Segment gate UI (ON/OFF buttons, enqueue robot action)
+# Segment gate UI (buttons)
 # -------------------------------
 class TrackGateUI:
-    """
-    One button per segment: enqueues an action for the app to:
-      hover -> down -> toggle the segment -> back to home.
-    Labels show 'ON' when the segment is IN, 'OFF' when OUT.
-    """
+    """Buttons toggle segments with animation; labels show IN/OUT."""
     def __init__(self, env, app, ring: "TrackRing"):
         self.env = env
         self.app = app
@@ -402,11 +283,9 @@ class TrackGateUI:
         n = self.ring.cfg.n_segments
         for i in range(n):
             def make_cb(idx):
-                def _cb(event=None):   # Swift passes one arg
-                    # enqueue: robot visit + toggle
-                    self.app.enqueue_toggle(idx)
+                def _cb(event=None):
+                    self.app.toggle_segment(idx)  # simple, no robot
                 return _cb
-
             btn = swift.Button(cb=make_cb(i), desc=self._label_for(i))
             self.env.add(btn)
             self.buttons.append(btn)
@@ -416,21 +295,14 @@ class TrackGateUI:
             btn.desc = self._label_for(i)
 
 
-
-
 # -------------------------------
 # App wrapper
 # -------------------------------
 class App:
-
-
     def __init__(self):
         self.env = swift.Swift()
         self.env.launch(realtime=True, port=0)
         self.dt = 0.05
-        self.actions = []          # queued jobs like ('toggle', idx)
-        self.task = None           # current task state machine dict, or None
-
 
     def add_floor(self, size=(8, 8, 0.02), z=-0.01):
         self.env.add(Cuboid(scale=list(size), pose=SE3(0, 0, z), color=[0.9, 0.9, 0.95, 1]))
@@ -450,109 +322,40 @@ class App:
         self.zones.build()
 
     def add_track_gates(self):
-        self.gates = TrackGateUI(self.env, self, self.ring)  # pass app=self
+        self.gates = TrackGateUI(self.env, self, self.ring)
         self.gates.build()
 
+    # Called by UI button
+    def toggle_segment(self, idx: int):
+        want_present = (idx in self.ring.gapset)  # OUT -> IN
+        self.ring.start_slide(idx, present=want_present, dur=0.8)
 
     def loop(self):
         try:
             while True:
-                # stop train if current/next segment is OUT
+                # train motion (with gating)
                 gated_v = self.ring.allowed_speed(self.train.theta, self.train.speed)
                 self.train.step(self.dt, gated_v)
 
-                # NEW 1) Robot IK toward its current goal
+                # have the robot spin its waist to follow the train
                 if hasattr(self, "robot"):
-                    self.robot.update(self.dt)
+                    self.robot.follow_train_yaw(self.train.theta, yaw_bias=0.0)
 
-                # keep orange blocks riding with their OWN segment
+                # remember if something was animating
+                was_anim = self.ring.is_animating()
+
+                # update ring (animation) and blocks
+                self.ring.update()
                 self.zones.update()
 
-                # NEW 2) Start next queued action if idle                
-                if (self.task is None) and self.actions:
-                    kind, idx, want_present = self.actions.pop(0)
-                    if kind == 'toggle':
-                        self._start_toggle_task(idx, want_present)
+                # if an animation finished this frame, refresh button labels
+                if was_anim and not self.ring.is_animating() and hasattr(self, 'gates'):
+                    self.gates.refresh_labels()
 
-
-                # NEW 3) Advance task phases (hover -> down -> toggle -> up -> home)
-                self._advance_task()
-
-                # Render
+                # render
                 self.env.step(self.dt)
         except KeyboardInterrupt:
             print("Exiting simulation...")
-
-
-    def enqueue_toggle(self, idx: int, preempt=True):
-        """
-        Queue 'visit block & set segment to desired state'.
-        We compute the desired state now (so it always toggles),
-        and optionally preempt the current task so the new click
-        starts right away.
-        """
-        want_present = (idx in self.ring.gapset)  # if currently OUT, set present=True (IN)
-        job = ('toggle', idx, want_present)
-
-        if preempt and self.task is not None:
-            print(f"[preempt] stopping current task for seg {idx}")
-            self.task = None
-            self.actions.clear()
-
-        # start immediately if idle, else queue
-        if self.task is None:
-            self._start_toggle_task(idx, want_present)
-        else:
-            self.actions.append(job)
-
-
-    def _start_toggle_task(self, idx: int, want_present: bool):
-        """Begin the 4-phase routine for this segment (hover -> down -> set -> up -> home)."""
-        block_T = SE3(self.zones.blocks[idx].T)   # live frame of the orange block
-        hover_T = self.robot.pose_above_block(block_T, hover=0.25, mode="hover")
-        self.robot.set_goal(hover_T)
-        self.task = {
-            'type': 'toggle',
-            'idx': idx,
-            'want_present': want_present,
-            'phase': 'go_hover'
-        }
-        print(f"[start] seg {idx} -> {'IN' if want_present else 'OUT'}")
-
-
-    def _advance_task(self):
-        """Advance the state machine when the robot reaches sub-goals."""
-        if self.task is None:
-            return
-        t = self.task
-        idx = t['idx']
-        block_T = SE3(self.zones.blocks[idx].T)
-
-        if t['phase'] == 'go_hover' and self.robot.at_goal():
-            self.robot.set_goal(self.robot.pose_above_block(block_T, down=0.05, mode="down"))
-            t['phase'] = 'go_down'
-
-        elif t['phase'] == 'go_down' and self.robot.at_goal():
-            # apply the desired state NOW (explicit, no ambiguity)
-            self.ring.set_segment_present(idx, present=t['want_present'])
-            print(f"[toggle] seg {idx} -> {'IN' if t['want_present'] else 'OUT'}; gapset={sorted(self.ring.gapset)}")
-            if hasattr(self, 'gates'):
-                self.gates.refresh_labels()
-            # go back up
-            self.robot.set_goal(self.robot.pose_above_block(block_T, hover=0.25, mode="hover"))
-            t['phase'] = 'go_up'
-
-        elif t['phase'] == 'go_up' and self.robot.at_goal():
-            self.robot.set_goal(self.robot.home_pose())
-            t['phase'] = 'go_home'
-
-        elif t['phase'] == 'go_home' and self.robot.at_goal():
-            # finished; immediately start next queued action if any
-            self.task = None
-            if self.actions:
-                kind, idx2, want_present2 = self.actions.pop(0)
-                if kind == 'toggle':
-                    self._start_toggle_task(idx2, want_present2)
 
 
 # -------------------------------
@@ -569,8 +372,8 @@ if __name__ == "__main__":
     app.add_ring(seg_path, cfg)
     app.add_train(train_path, cfg)
 
-    app.add_track_gates()      # ON/OFF buttons
-    app.add_robot(cfg)         # Panda at center (static for now)
-    app.add_linked_zones(cfg)  # red reference blocks (follow segment state)
+    app.add_track_gates()      # side buttons
+    app.add_robot(cfg)         # Panda that spins with the train
+    app.add_linked_zones(cfg)  # red blocks following segments
 
     app.loop()
