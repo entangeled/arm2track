@@ -9,7 +9,7 @@ Custom DH Parameters with Official KUKA Meshes
 # ============================================================================
 import numpy as np
 from math import pi
-from roboticstoolbox import DHRobot, RevoluteDH, Robot, jtraj
+from roboticstoolbox import DHRobot, RevoluteDH, Robot, jtraj, trapezoidal
 from spatialmath import SE3
 import swift
 from ir_support import CylindricalDHRobotPlot, DHRobot3D
@@ -80,13 +80,13 @@ class KUKAiiwa(DHRobot3D):
         """
         
         # Define home position (all joints at 0)
-        self.q_home = np.array([0, 90, 0, 90, 90, 90, 0]) * pi/180
+        self.q_home = np.array([0, 0, 0, 0, 0, 0, 0]) * pi/180
         
         # Define a ready position (comfortable starting pose)
         self.q_ready = np.array([0, 0, 0, 0, 0, 0, 0]) * pi/180
        
         # Get stl files path
-        mesh_dir = Path(__file__).parent
+        mesh_dir = Path(__file__).resolve().parent
         mesh_path = mesh_dir / "iiwa7_mesh_files" 
 
         super().__init__(links, link3D_names, name = "KUKA_iiwa_7_R800", link3d_dir = mesh_path, qtest = qtest, qtest_transforms = qtest_transforms)
@@ -122,6 +122,13 @@ class KUKAiiwa(DHRobot3D):
             links.append(link)
         return links
 
+    def get_trajectory(self, end_pose: SE3, steps= 100) -> list:
+        trajectory = jtraj(self.q, end_pose, steps).q
+        return trajectory
+    
+    def get_ee_pose(self) -> SE3:
+        return self.fkine(self.q)
+
     def test_kinematics(self):
         """Test forward kinematics at home position"""
         
@@ -141,35 +148,54 @@ class KUKAiiwa(DHRobot3D):
     def test_in_swift(self):
         env = swift.Swift()
         env.launch(realtime=True)
+        env.set_camera_pose([1, 1, 2], [0, 0, 0.5])
         self.add_to_env(env)
+        
         
         # Move through a few poses quickly
         poses = [
             [0, 0, 0, 0, 0, 0, 0],           # Straight up
             [pi/2, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, pi/2, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, 0, pi/2, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, 0, 0, pi/2, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, 0, 0, 0, pi/2, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, 0, 0, 0, 0, pi/2, 0],
-            [0, 0, 0, 0, 0, 0, 0],
             [0, 0, 0, 0, 0, 0, pi/2]
         ]
         input("Press enter to start...")
         for q in poses:
-            trajectory = jtraj(iiwa.q, q, 50).q
-            for i in trajectory:
-                iiwa.q = i
-                env.step(0.03)
-            print(f"    Pose: {q}")
+            for i in self.get_trajectory(q):
+                self.q = i
+                env.step(0.05)
+            print("Pose complete, moving to next...")
             time.sleep(1)
         
         env.close()
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+
+    print("\n" + "="*50)
+    print("KUKA LBR iiwa 7 R800 Robot TESTING")
+    print("="*50 + "\n")
+    
+    iiwa = KUKAiiwa()
+    # iiwa.test_kinematics()
+    iiwa.test_in_swift()
+    # iiwa.test_dh_vs_visual_in_swift()
+
+
+# ============================================================================
+# METHODS NO LONGER USED
+# ============================================================================
+
+# Below method was used for debugging DH parameters vs the Mesh files locations, helped solve the differences
+'''''
 
     def test_dh_vs_visual_in_swift(self):
         """
@@ -312,17 +338,4 @@ class KUKAiiwa(DHRobot3D):
         
         env.close()
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
-if __name__ == "__main__":
-
-    print("\n" + "="*50)
-    print("KUKA LBR iiwa 7 R800 Robot TESTING")
-    print("="*50 + "\n")
-    
-    iiwa = KUKAiiwa()
-    # iiwa.test_kinematics()
-    iiwa.test_in_swift()
-    # iiwa.test_dh_vs_visual_in_swift()
+'''''
