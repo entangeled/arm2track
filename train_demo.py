@@ -1,4 +1,4 @@
-# train_demo_clean.py — Ring + Train + Panda follow + Animated Segment Toggles + ONE RTB URx pick/place
+# train_demo_clean.py — Ring + Train + Panda follow + Animated Segment Toggles + goodbot500 + ONE RTB URx pick/place
 from math import pi, cos
 from pathlib import Path
 from dataclasses import dataclass
@@ -7,25 +7,19 @@ import numpy as np
 from spatialmath import SE3
 from spatialgeometry import Mesh, Cuboid
 from roboticstoolbox.backends import swift
-from roboticstoolbox import models  # Panda model
-import roboticstoolbox as rtb       # RTB robot models (UR3/UR5/etc.)
-from pathlib import Path
-import sys
+from roboticstoolbox import models            # Panda model
+import roboticstoolbox as rtb                 # RTB robot models (UR3/UR5/etc.)
 
-# add the EVABOT directory to the Python path so it can be imported
-HERE = Path(__file__).resolve().parent
-sys.path.append(str(HERE / "Robots" / "EVABOT"))
-
-from three_dof_meshes_with_cyl_viz import ThreeDOFMeshes
-
+# ← your custom robot
+from Robots.EVABOT.goodbot500 import goodbot500
 
 # =========================
 # User-tweakable settings
 # =========================
-ROBOT_MODEL = "UR3"        # ← change to "UR5", "UR10", etc. (any rtb.models.<Name>)
-BASE_SLOT   = 5            # ← place the robot aligned to this slot (0..n_segments-1)
-BASE_MARGIN = 0.10         # ← radial margin outside the ring (meters)
-HOVER_LIFT  = 0.20         # ← hover height for pick/place (meters)
+ROBOT_MODEL = "UR3"        # change to "UR5", "UR10", etc. (any rtb.models.<Name>)
+BASE_SLOT   = 5            # place the URx aligned to this ring slot (0..n_segments-1)
+BASE_MARGIN = 0.10         # radial margin outside the ring (meters)
+HOVER_LIFT  = 0.20         # hover height for pick/place (meters)
 
 # -------------------------------
 # Config
@@ -56,7 +50,7 @@ class TrackRing:
         self.gapset = set()
         self.out_offset = 0.30
         self.anim = {}
-        self.missing_slots = {6, 7}            # <- per your requirements
+        self.missing_slots = {6, 7}
         self.slot_poses = [None] * self.cfg.n_segments
 
     def build(self):
@@ -86,8 +80,7 @@ class TrackRing:
         if self.pieces[i] is None:
             return
         c = self.cfg
-        n = c.n_segments
-        theta = 2 * pi * i / n
+        theta = 2 * pi * i / c.n_segments
         T = (
             SE3(c.center_x, c.center_y, c.height_z)
             * SE3.Rz(c.global_yaw_deg * pi / 180)
@@ -102,8 +95,7 @@ class TrackRing:
         c = self.cfg
         r_in, r_out = c.radius, c.radius + self.out_offset
         finished = []
-        n = c.n_segments
-        for i in range(n):
+        for i in range(c.n_segments):
             if i in self.missing_slots:
                 self.gapset.add(i)
                 continue
@@ -117,8 +109,7 @@ class TrackRing:
                 if u >= 1.0:
                     finished.append(i)
             else:
-                r = r_out if (i in self.gapset) else r_in
-                self._place_segment(i, r)
+                self._place_segment(i, r_out if (i in self.gapset) else r_in)
         for i in finished:
             final_r = self.anim[i]['r1']
             if abs(final_r - (c.radius + self.out_offset)) < 1e-9:
@@ -146,18 +137,13 @@ class TrackRing:
         if n <= 0:
             return requested_speed
         gaps = self.gapset | self.missing_slots
-        if not gaps:
-            return requested_speed
         i = int(((theta_now % (2*pi)) / (2*pi)) * n) % n
         ahead = (i + 1) % n
-        if i in gaps or ahead in gaps:
-            return 0.0
-        return requested_speed
+        return 0.0 if (i in gaps or ahead in gaps) else requested_speed
 
     def segment_pose_with_offset(self, idx: int, theta_offset: float = 0.0):
         c = self.cfg
-        n = c.n_segments
-        theta = 2 * pi * idx / n + theta_offset
+        theta = 2 * pi * idx / c.n_segments + theta_offset
         r = (c.radius + self.out_offset) if (idx in self.gapset) else c.radius
         return (
             SE3(c.center_x, c.center_y, c.height_z)
@@ -220,7 +206,6 @@ class Train:
 # Linked reach blocks (orange)
 # -------------------------------
 class TrackLinkedZones:
-    """Small red/orange blocks fixed to each base slot pose (do not move with IN/OUT)."""
     def __init__(self, env, ring: "TrackRing", cfg: "RingCfg"):
         self.env = env
         self.ring = ring
@@ -232,11 +217,8 @@ class TrackLinkedZones:
         self.world_points = []
         self.overrides = {}  # index -> SE3 (if robot is carrying / repositioned)
 
-    def set_override(self, i: int, T: SE3):
-        self.overrides[i] = SE3(T)
-
-    def clear_override(self, i: int):
-        self.overrides.pop(i, None)
+    def set_override(self, i: int, T: SE3): self.overrides[i] = SE3(T)
+    def clear_override(self, i: int): self.overrides.pop(i, None)
 
     def _block_pose_for_index(self, i: int):
         baseT = self.ring.slot_poses[i]
@@ -254,19 +236,13 @@ class TrackLinkedZones:
 
     def update(self):
         for i, block in enumerate(self.blocks):
-            if i in self.overrides:
-                T = self.overrides[i]
-            else:
-                T = self._block_pose_for_index(i)
+            T = self.overrides[i] if i in self.overrides else self._block_pose_for_index(i)
             block.T = T.A
             p = T.t
             self.world_points[i] = (float(p[0]), float(p[1]), float(p[2]))
 
-    def get_points(self):
-        return list(self.world_points)
-
 # -------------------------------
-# Panda robot in the middle (follow-the-train waist)
+# Panda (center) follows the train by waist
 # -------------------------------
 class RobotArm:
     def __init__(self, env, cfg: RingCfg):
@@ -276,12 +252,11 @@ class RobotArm:
         self.robot.base = SE3(cfg.center_x, cfg.center_y, 0.0)
         env.add(self.robot)
         self.q_follow = self.robot.qz.copy()
-        DOWN_TILT, BACK_REACH, WRIST_PITCH = 0.5, -1.7, 2.1
-        self.q_follow[1] = DOWN_TILT
+        self.q_follow[1] = 0.5
         self.q_follow[2] = 0.40
-        self.q_follow[3] = BACK_REACH
+        self.q_follow[3] = -1.7
         self.q_follow[4] = 0.00
-        self.q_follow[5] = WRIST_PITCH
+        self.q_follow[5] = 2.1
         self.q_follow[6] = 0.70
         self._j0_min, self._j0_max = -2.8973, 2.8973
 
@@ -291,12 +266,11 @@ class RobotArm:
     def follow_train_yaw(self, theta, yaw_bias=0.0):
         q = self.q_follow.copy()
         j0 = self._wrap_pi(theta + yaw_bias)
-        j0 = float(np.clip(j0, self._j0_min, self._j0_max))
-        q[0] = j0
+        q[0] = float(np.clip(j0, self._j0_min, self._j0_max))
         self.robot.q = q
 
 # -------------------------------
-# Segment gate UI (buttons)
+# Segment gate UI
 # -------------------------------
 class TrackGateUI:
     def __init__(self, env, app, ring: "TrackRing"):
@@ -326,7 +300,7 @@ class App:
         self.env.launch(realtime=True, port=0)
         self.dt = 0.05
 
-    # Scene
+    # Scene bits
     def add_floor(self, size=(8, 8, 0.02), z=-0.01):
         self.env.add(Cuboid(scale=list(size), pose=SE3(0, 0, z), color=[0.9, 0.9, 0.95, 1]))
     def add_ring(self, seg_path, cfg: RingCfg):
@@ -340,35 +314,50 @@ class App:
     def add_track_gates(self):
         self.gates = TrackGateUI(self.env, self, self.ring); self.gates.build()
 
+    # 👉 YOUR GOODBOT500 (added BEFORE the UR3)
+    def add_goodbot(self, cfg: RingCfg):
+        """
+        Spawns your EVABOT.goodbot500 and adds its STL meshes to Swift.
+        Positioned just outside the ring on the opposite side of the URx by default.
+        """
+        self.good = goodbot500()
+        # place near slot opposite to BASE_SLOT so it doesn't collide with the URx
+        opposite_slot = (BASE_SLOT + cfg.n_segments // 2) % cfg.n_segments
+        theta = 2 * np.pi * opposite_slot / cfg.n_segments
+        self.good.base = (
+            SE3(cfg.center_x, cfg.center_y, 0.0)
+            * SE3.Rz(theta)
+            * SE3.Tx(cfg.radius + 0.12)
+            * SE3.Rz(np.pi)              # face inward
+        )
+        self.good.add_to_env(self.env)
+
     # Ring toggle
     def toggle_segment(self, idx: int):
         want_present = (idx in self.ring.gapset)
         self.ring.start_slide(idx, present=want_present, dur=0.8)
 
-    # ====== ONE outer robot (RTB model switchable by ROBOT_MODEL) ======
+    # URx outer arm (switchable model)
     def add_outer_arm(self, cfg: RingCfg, model_name: str = ROBOT_MODEL, slot_index: int = BASE_SLOT, margin: float = BASE_MARGIN):
-        # build model by name from rtb.models
         try:
             RobotClass = getattr(rtb.models, model_name)
         except AttributeError:
             raise RuntimeError(f"rtb.models has no '{model_name}'. Try 'UR3', 'UR5', 'UR10', etc.")
         self.arm = RobotClass()
-
         theta = 2 * np.pi * (slot_index % cfg.n_segments) / cfg.n_segments
         self.arm.base = (
             SE3(cfg.center_x, cfg.center_y, cfg.height_z)
             * SE3.Rz(theta)
             * SE3.Tx(cfg.radius + margin)
-            * SE3.Rz(np.pi)   # face inward
+            * SE3.Rz(np.pi)
         )
         self.env.add(self.arm)
-        # neutral-ish pose
         try:
             self.arm.q = [0, -1.57, 1.57, 0, 1.57, 0]
         except Exception:
             pass
 
-    # ===== IK utilities for robot pick/place =====
+    # IK helpers for pick/place
     def _T_in_base(self, robot, T_world: SE3) -> SE3:  return SE3(robot.base).inv() * T_world
     def _T_out_of_base(self, robot, T_in_base: SE3) -> SE3:  return SE3(robot.base) * T_in_base
 
@@ -390,49 +379,32 @@ class App:
             self.env.step(self.dt)
         return q_goal
 
-    # ===== public: keep name as requested =====
+    # Visual pick&place using the URx
     def ur3_pick_and_place_orange(self, src=5, dst=7, lift=HOVER_LIFT):
-        """
-        Visually pick orange[src] with the selected outer robot (ROBOT_MODEL) and place at orange[dst].
-        Uses a tool-down orientation for robust IK.
-        """
         robot = self.arm
         block = self.zones.blocks[src]
-
-        # world poses of source/target orange frames
         T_src_ref = self.zones._block_pose_for_index(src)
         T_dst_ref = self.zones._block_pose_for_index(dst)
         p_src, p_dst = T_src_ref.t, T_dst_ref.t
-
         TOOL_DOWN = SE3.RPY([np.pi/2, 0, -np.pi], order="xyz")
         T_src       = SE3(p_src) * TOOL_DOWN
         T_dst       = SE3(p_dst) * TOOL_DOWN
         T_src_hover = SE3([p_src[0], p_src[1], p_src[2] + lift]) * TOOL_DOWN
         T_dst_hover = SE3([p_dst[0], p_dst[1], p_dst[2] + lift]) * TOOL_DOWN
         T_via       = SE3(((T_src_hover.t + T_dst_hover.t) * 0.5)) * TOOL_DOWN
-
-        # approach/grasp
         if self._ik_to(robot, T_src_hover, steps=70, label="src_hover") is None: return
         if self._ik_to(robot, T_src,       steps=60, label="src_down")  is None: return
-
-        # measure tool→block offset once at grasp
         Ttool_world = self._T_out_of_base(robot, robot.fkine(robot.q))
         T_tool_to_block = Ttool_world.inv() * SE3(block.T)
-        self._carry = (block, T_tool_to_block, src)  # start carrying
-        self.zones.set_override(src, SE3(block.T))   # prevent snap-back
-
-        # transit
+        self._carry = (block, T_tool_to_block, src)
+        self.zones.set_override(src, SE3(block.T))
         if self._ik_to(robot, T_src_hover, steps=50, label="lift")      is None: return
         if self._ik_to(robot, T_via,       steps=70, label="via")       is None: return
         if self._ik_to(robot, T_dst_hover, steps=70, label="dst_hover") is None: return
         if self._ik_to(robot, T_dst,       steps=60, label="dst_down")  is None: return
-
-        # release at destination
         self._carry = None
         block.T = T_dst.A
-        self.zones.set_override(src, T_dst)          # leave it there (even if overlaps)
-
-        # clear up
+        self.zones.set_override(src, T_dst)
         self._ik_to(robot, T_dst_hover, steps=50, label="clear")
         print(f"{ROBOT_MODEL} moved orange block {src} → {dst}")
 
@@ -467,14 +439,18 @@ if __name__ == "__main__":
     app.add_ring(seg_path, cfg)
     app.add_train(train_path, cfg)
 
-    # one outer arm — model & placement are configurable at the top
+    # 1) add YOUR goodbot500 first (as requested)
+    app.add_goodbot(cfg)
+
+    # 2) then add the URx outer arm
     app.add_outer_arm(cfg, model_name=ROBOT_MODEL, slot_index=BASE_SLOT, margin=BASE_MARGIN)
 
+    # rest of the scene
     app.add_track_gates()
-    app.add_robot(cfg)          # Panda (center) with follow posture
+    app.add_robot(cfg)          # Panda in the middle
     app.add_linked_zones(cfg)   # orange blocks
 
-    # Button to run the move (kept the same name/signature)
+    # pick→place button
     btn_ur3move = swift.Button(
         cb=lambda e=None: app.ur3_pick_and_place_orange(5, 7),
         desc=f"{ROBOT_MODEL}: orange 5 → 7"

@@ -458,9 +458,6 @@ class App:
     def add_robot(self, cfg: RingCfg):
         self.robot = RobotArm(self.env, cfg)
 
-    def add_linked_zones(self, cfg: RingCfg):
-        self.zones = TrackLinkedZones(self.env, self.ring, cfg)
-        self.zones.build()
 
     def add_track_gates(self):
         self.gates = TrackGateUI(self.env, self, self.ring)  # pass app=self
@@ -470,31 +467,22 @@ class App:
     def loop(self):
         try:
             while True:
-                # stop train if current/next segment is OUT
                 gated_v = self.ring.allowed_speed(self.train.theta, self.train.speed)
                 self.train.step(self.dt, gated_v)
 
-                # NEW 1) Robot IK toward its current goal
                 if hasattr(self, "robot"):
-                    self.robot.update(self.dt)
+                    self.robot.follow_train_yaw(self.train.theta, yaw_bias=-pi/4.5)
 
-                # keep orange blocks riding with their OWN segment
-                self.zones.update()
+                was_anim = self.ring.is_animating()
+                self.ring.update()
 
-                # NEW 2) Start next queued action if idle                
-                if (self.task is None) and self.actions:
-                    kind, idx, want_present = self.actions.pop(0)
-                    if kind == 'toggle':
-                        self._start_toggle_task(idx, want_present)
+                if was_anim and not self.ring.is_animating() and hasattr(self, 'gates'):
+                    self.gates.refresh_labels()
 
-
-                # NEW 3) Advance task phases (hover -> down -> toggle -> up -> home)
-                self._advance_task()
-
-                # Render
                 self.env.step(self.dt)
         except KeyboardInterrupt:
             print("Exiting simulation...")
+
 
 
     def enqueue_toggle(self, idx: int, preempt=True):
@@ -581,9 +569,7 @@ if __name__ == "__main__":
     app.add_floor()
     app.add_ring(seg_path, cfg)
     app.add_train(train_path, cfg)
-
-    app.add_track_gates()      # ON/OFF buttons
-    app.add_robot(cfg)         # Panda at center (static for now)
-    app.add_linked_zones(cfg)  # red reference blocks (follow segment state)
-
+    app.add_track_gates()
+    app.add_robot(cfg)
     app.loop()
+

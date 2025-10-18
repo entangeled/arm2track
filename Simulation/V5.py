@@ -207,7 +207,8 @@ class TrackLinkedZones:
         n = self.cfg.n_segments
         for i in range(n):
             T = self._block_pose_for_index(i)
-            cube = Cuboid([0.05, 0.05, 0.02], pose=T, color=[0.95, 0.35, 0.35, 0.9])
+            # CHANGED: make blocks effectively invisible (keep geometry & functions intact)
+            cube = Cuboid([0.05, 0.05, 0.02], pose=T, color=[1.0, 1.0, 1.0, 0.02])
             self.env.add(cube)
             self.blocks.append(cube)
             p = T.t
@@ -441,6 +442,6 @@ if __name__ == "__main__":
 
     app.add_track_gates()      # side buttons
     app.add_robot(cfg)         # Panda that spins with the train
-    app.add_linked_zones(cfg)  # red blocks following segments
+    app.add_linked_zones(cfg)  # blocks kept but nearly invisible
 
     app.loop()

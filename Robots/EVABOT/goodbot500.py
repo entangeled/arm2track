@@ -22,13 +22,13 @@ class goodbot500(DHRobot3D):
 
         # Names of the robot link files in the directory
         link3D_names = dict(
-            link0="stationary_base",    # base
-            link1="rotation_base",      # link 1
-            link2="link1",              # link 2
-            link3="link2",              # link 3
-            link4="link3",              # link 4
-            link5="link4",              # link 5
-            link6="end_effector_cap"    # tool cap
+            link0="stationary_base", color0 = "pink",   # base
+            link1="rotation_base", color1 = "white",    # link 1
+            link2="link1", color2 = "pink",              # link 2
+            link3="link2", color3 = "white",              # link 3
+            link4="link3", color4 = "pink",            # link 4
+            link5="link4", color5 = "white",             # link 5
+            link6="end_effector_cap", color6 = "pink"   # tool cap
         )
 
 
