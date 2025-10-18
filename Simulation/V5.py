@@ -237,6 +237,11 @@ class RobotArm:
         self.robot.base = SE3(cfg.center_x, cfg.center_y, 0.0)
         env.add(self.robot)
 
+        self._theta_prev = None      # last train angle (wrapped)
+        self._theta_u = 0.0          # unwrapped train angle accumulator
+        self._j0 = float(self.robot.q[0])  # current waist state for smoothing
+
+
         # --- FOLLOW POSTURE (EDITED SECTION) ---
         # Start from a neutral pose and bend down/back toward the train
         self.q_follow = self.robot.qz.copy()
@@ -280,16 +285,50 @@ class RobotArm:
 
     @staticmethod
     def _wrap_pi(a):
-        """wrap angle to (-pi, pi]"""
+        # Wrap angle to (-pi, pi]
+        import numpy as np
         return (a + np.pi) % (2*np.pi) - np.pi
 
-    def follow_train_yaw(self, theta, yaw_bias=0.0):
-        """Rotate only joint 0 so the arm spins around the pedestal."""
+    def follow_train_yaw(self, theta, yaw_bias=0.0, margin=0.25, gain=0.25):
+        """
+        Smoothly steer joint-0 with no jump at 2π and no sticking at limits.
+        - margin: keep this much away from absolute limits (rad)
+        - gain:   0..1 smoothing toward the target (higher = snappier)
+        """
+
+        import numpy as np
+
+        # 1) Build a continuous (unwrapped) train angle
+        if self._theta_prev is None:
+            self._theta_prev = theta
+        dtheta = self._wrap_pi(theta - self._theta_prev)  # small delta in (-pi,pi]
+        self._theta_u += float(dtheta)                     # accumulate (unwrapped)
+        self._theta_prev = theta
+
+        # Desired absolute yaw (continuous), include your bias
+        desired = self._theta_u + float(yaw_bias)
+
+        # 2) Keep the command inside a safe sub-range of joint-0
+        lo_abs = self._j0_min + margin
+        hi_abs = self._j0_max - margin
+        span   = (hi_abs - lo_abs)            # total safe width
+        center = 0.5 * (hi_abs + lo_abs)
+
+        # Remove multiples of 2π so the command stays near the center of safe span
+        k = int(round((desired - center) / (2*np.pi)))
+        j0_cmd = desired - k * (2*np.pi)
+
+        # Clip to safe range (rarely needed after re-centering)
+        j0_cmd = float(np.clip(j0_cmd, lo_abs, hi_abs))
+
+        # 3) Smooth toward the target command
+        self._j0 = float(self._j0 + gain * (j0_cmd - self._j0))
+
+        # 4) Apply on top of your "follow" posture
         q = self.q_follow.copy()
-        j0 = self._wrap_pi(theta + yaw_bias)
-        j0 = float(np.clip(j0, self._j0_min, self._j0_max))
-        q[0] = j0
+        q[0] = self._j0
         self.robot.q = q
+
 
 
 
@@ -367,7 +406,7 @@ class App:
 
                 # have the robot spin its waist to follow the train
                 if hasattr(self, "robot"):
-                    self.robot.follow_train_yaw(self.train.theta, yaw_bias= -pi/3.5)
+                    self.robot.follow_train_yaw(self.train.theta, yaw_bias= -pi/4.5)
 
                 # remember if something was animating
                 was_anim = self.ring.is_animating()
