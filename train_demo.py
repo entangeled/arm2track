@@ -11,7 +11,7 @@ from roboticstoolbox import models  # Panda model
 import roboticstoolbox as rtb
 
 # ← your custom EVABOT
-from Robots.EVABOT.goodbot500 import goodbot500
+from Robots.EVABOT.barbie import barbie
 
 
 # =========================
@@ -39,7 +39,7 @@ class TrackRing:
         s = cfg.unit_scale; self.scale = [s, s, s]
         self.pieces = []; self.gapset = set()
         self.out_offset = 0.30
-        self.anim = {}; self.missing_slots = {7}
+        self.anim = {}; self.missing_slots = {5}
         self.slot_poses = [None]*cfg.n_segments
 
     def build(self):
@@ -176,7 +176,7 @@ class App:
 
     # only goodbot500
     def add_goodbot(self,cfg):
-        self.good=goodbot500()
+        self.good=barbie()
         theta=2*pi*5/cfg.n_segments
         self.good.base=(SE3(cfg.center_x,cfg.center_y,0)
                         * SE3.Rz(theta)
