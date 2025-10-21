@@ -59,6 +59,7 @@ class TrackRing:
         self.gapset |= set(self.missing_slots)
         self.update()
 
+
     def _place_segment(self, i:int, r:float):
         if self.pieces[i] is None: return
         c=self.cfg; theta=2*pi*i/c.n_segments
