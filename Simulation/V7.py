@@ -10,7 +10,10 @@ from roboticstoolbox.backends import swift
 from roboticstoolbox import models  # Panda model
 import roboticstoolbox as rtb
 
-# ← your custom EVABOT
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from Robots.EVABOT.goodbot500 import goodbot500
 
 
@@ -104,17 +107,14 @@ class TrackRing:
 # Train
 # -------------------------------
 class Train:
-    """Train perfectly aligned on the track and driven by angular speed."""
     def __init__(self, env, mesh_path, cfg: RingCfg):
         self.env = env
         self.cfg = cfg
         self.theta = 0.0
         self.speed = 1.0  # rad/s
         s = cfg.unit_scale
-
         self.mesh = Mesh(str(mesh_path), pose=SE3(), scale=[s, s, s], color=[0.12, 0.12, 0.12, 1])
         env.add(self.mesh)
-
         self.height_offset = 0.10
         self.radial_offset = 0.11
         self.forward_offset = 0.00
