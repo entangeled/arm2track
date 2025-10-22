@@ -14,6 +14,11 @@ import roboticstoolbox as rtb
 from Robots.EVABOT.barbie import barbie
 
 
+# <- safety feature code IF CODE ERRORS REMOVE THIS!!
+from safety_simulation import SafetySimulation
+
+
+
 # =========================
 # Config
 # =========================
