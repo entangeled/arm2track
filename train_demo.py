@@ -230,3 +230,6 @@ if __name__ == "__main__":
     app.env.add(swift.Button(cb=wiggle_goodbot, desc="goodbot500: wiggle"))
 
     app.loop()
+#remove bottom if it does not work 
+    sim = SafetySimulation(light_curtain_x=0.35)
+    sim.start(urdf_path="correcto.urdf", urdf_scale=0.001)
